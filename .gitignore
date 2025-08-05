@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-selfcheck.json
+*.egg-info/
+dist/
+build/
+*.so
+*.dll
+
+# Secrets
+.env
+*.env
+.env.*
+secrets.yml
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+
+# Outputs
+/outputs/
+/documentary_output/
+/documentary_source/
+*.png
+*.mp4
+
+# Other
+/config/LTXV_workflow_optimized.json
+.DS_Store
