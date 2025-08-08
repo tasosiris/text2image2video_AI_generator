@@ -71,6 +71,31 @@ python src/run_pipeline.py
 
 The script will print its progress to the console, and you can find the final output in a newly created folder inside the `/outputs` directory.
 
+## YouTube Upload (Optional)
+
+Add one-click upload of the latest final video to YouTube.
+
+1. Enable the YouTube Data API v3 in your Google Cloud project and create an OAuth 2.0 Client ID (Desktop App).
+2. Save the downloaded client secret JSON as `config/client_secret.json`.
+3. Copy the example config and adjust as needed:
+   ```bash
+   cp config/youtube_config.example.json config/youtube_config.json
+   ```
+4. Install uploader dependencies:
+   ```bash
+   pip install -r requirements.youtube.txt
+   ```
+5. First-time auth (opens browser):
+   ```bash
+   python src/upload_youtube.py --auth
+   ```
+6. Upload latest final video:
+   ```bash
+   python src/upload_youtube.py
+   ```
+
+To auto-upload at the end of the pipeline, set `"auto_upload": true` in `config/youtube_config.json`.
+
 ## Project Structure
 
 ```

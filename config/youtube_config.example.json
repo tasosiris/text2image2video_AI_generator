@@ -1,0 +1,16 @@
+{
+  "client_secrets_file": "config/client_secret.json",
+  "token_file": "config/youtube_token.json",
+  "default_privacy_status": "private",
+  "category_id": "27",
+  "tags": [
+    "documentary",
+    "history",
+    "ancient greece",
+    "ancient rome"
+  ],
+  "playlist_id": "",
+  "auto_upload": false,
+  "upload_thumbnail": true
+}
+
