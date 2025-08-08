@@ -1,0 +1,5 @@
+[33m55c0ed7[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m chore: Untrack sensitive config files and update .gitignore
+[33m7a3b2be[m feat: Refine prompts, API settings, and error handling
+[33m13c278b[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Merge branch 'main' of https://github.com/tasosiris/text2image2video_AI_generator
+[33m023f9bd[m fix: Correct formatting in README.md
+[33m07cf033[m Update README.md
