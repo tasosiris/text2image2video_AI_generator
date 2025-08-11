@@ -3,14 +3,15 @@
 Upload the latest generated final video to YouTube.
 
 - Discovers the most recent output folder containing `final_video_transitions.mp4`
-- Builds title/description from `documentary_data.json` and `narration.txt`
+- Generates a clickbaity SEO title, dense keyword tags, and a keyword-heavy description
+  using AIMLAPI (OpenAI-compatible) based on the project's metadata
 - Uses OAuth2 Installed App flow; stores token under `config/youtube_token.json`
-- Optional playlist insertion and thumbnail upload (first scene image) if present
+- Sets video to public and NOT made for kids
+- Optionally uploads a thumbnail (first scene image if present)
 
 First-time setup:
 - Enable YouTube Data API v3 for your Google Cloud project
 - Create an OAuth 2.0 Client ID (Desktop app) and download the JSON to `config/client_secret.json`
-- Copy `config/youtube_config.example.json` to `config/youtube_config.json` and adjust values
 - Install deps: `pip install -r requirements.youtube.txt`
 
 Usage:
@@ -31,7 +32,17 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
+from openai import OpenAI
+
+# AIMLAPI (OpenAI-compatible) client for metadata generation
+AIML_API_KEY = os.getenv("AIML_API_KEY")
+AIML_BASE_URL = os.getenv("AIML_BASE_URL", "https://api.aimlapi.com/v1")
+MODEL_ID = os.getenv("AIML_MODEL_ID", "gpt-4o")
+try:
+    aiml_client: Optional[OpenAI] = OpenAI(api_key=AIML_API_KEY, base_url=AIML_BASE_URL) if AIML_API_KEY else None
+except Exception:
+    aiml_client = None
 
 try:
     from google.oauth2.credentials import Credentials
@@ -62,28 +73,33 @@ def _outputs_dir() -> Path:
     return _project_root() / "outputs"
 
 
+def _find_video_in_folder(folder: Path) -> Optional[Path]:
+    """Finds the final video file in a folder, preferring the version with music."""
+    video_with_music = folder / "final_video_with_music.mp4"
+    if video_with_music.exists() and video_with_music.stat().st_size > 0:
+        return video_with_music
+
+    video_transitions = folder / "final_video_transitions.mp4"
+    if video_transitions.exists() and video_transitions.stat().st_size > 0:
+        return video_transitions
+
+    return None
+
+
 def load_youtube_config() -> Dict:
-    """Load config from `config/youtube_config.json` or fall back to defaults."""
+    """Compatibility shim: return built-in defaults (no external config file)."""
     config_dir = _project_root() / "config"
-    config_path = config_dir / "youtube_config.json"
-    default_config = {
+    return {
         "client_secrets_file": str(config_dir / "client_secret.json"),
         "token_file": str(config_dir / "youtube_token.json"),
-        "default_privacy_status": "private",  # private|unlisted|public
         "category_id": "27",  # Education
-        "tags": ["documentary", "history", "ancient greece", "ancient rome"],
-        "playlist_id": "",
-        "auto_upload": False,
         "upload_thumbnail": True,
+        # Kept for compatibility, ignored behaviorally
+        "default_privacy_status": "public",
+        "tags": [],
+        "playlist_id": "",
+        "auto_upload": True,
     }
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                user_cfg = json.load(f)
-            default_config.update(user_cfg or {})
-        except Exception as exc:
-            print(f"Warning: Failed to read youtube_config.json: {exc}", file=sys.stderr)
-    return default_config
 
 
 def find_latest_final_video() -> Optional[Tuple[Path, Path]]:
@@ -100,56 +116,116 @@ def find_latest_final_video() -> Optional[Tuple[Path, Path]]:
     # Sort by modified time desc
     candidate_folders.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     for folder in candidate_folders:
-        final_video = folder / "final_video_transitions.mp4"
-        if final_video.exists() and final_video.stat().st_size > 0:
+        final_video = _find_video_in_folder(folder)
+        if final_video:
             return folder, final_video
     return None
 
 
-def build_title_and_description(output_folder: Path) -> Tuple[str, str, Optional[Path]]:
-    """Create YouTube title and description from saved metadata.
-
-    Returns: (title, description, thumbnail_path)
-    """
+def _read_project_metadata(output_folder: Path) -> Tuple[str, Optional[str], str]:
+    """Return (idea_or_folder_name, theme, narration_text)."""
     data_path = output_folder / "documentary_data.json"
     narration_path = output_folder / "narration.txt"
-    images_dir = output_folder / "images"
-    title = output_folder.name
-    theme = None
+    idea = output_folder.name
+    theme: Optional[str] = None
     if data_path.exists():
         try:
             with open(data_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            title = data.get("idea") or title
+            idea = data.get("idea") or idea
             theme = data.get("theme") or None
         except Exception as exc:
             print(f"Warning: Failed to parse {data_path}: {exc}", file=sys.stderr)
-    description_lines = [
-        f"Published: {datetime.utcnow().strftime('%Y-%m-%d')} (UTC)",
-    ]
-    if theme:
-        description_lines.append(f"Theme: {theme}")
+    narration_text = ""
     if narration_path.exists():
         try:
             with open(narration_path, "r", encoding="utf-8") as f:
-                narration = f.read().strip()
-            description_lines.append("")
-            description_lines.append("Narration transcript:")
-            description_lines.append(narration)
+                narration_text = f.read().strip()
         except Exception as exc:
             print(f"Warning: Failed to read narration: {exc}", file=sys.stderr)
-    description_lines.append("")
-    description_lines.append("Generated automatically.")
-    description = "\n".join(description_lines)
+    return idea, theme, narration_text
 
-    # Prefer first scene image as thumbnail if exists
+
+def _truncate_tags_to_limit(tags: List[str], max_total_chars: int = 470) -> List[str]:
+    """YouTube tags total length limit is ~500 chars. Keep within a safe bound."""
+    out: List[str] = []
+    total = 0
+    for t in tags:
+        t = (t or "").strip()
+        if not t:
+            continue
+        candidate = total + len(t) + (1 if out else 0)
+        if candidate > max_total_chars:
+            break
+        out.append(t)
+        total = candidate
+    return out
+
+
+def ai_generate_youtube_metadata(output_folder: Path) -> Tuple[str, List[str], str, Optional[Path]]:
+    """Generate (title, tags, description, thumbnail_path) using AIMLAPI.
+
+    Falls back to simple defaults if AIMLAPI is unavailable.
+    """
+    images_dir = output_folder / "images"
+    idea, theme, narration = _read_project_metadata(output_folder)
+
+    # Thumbnail: prefer first scene image
     thumbnail_path: Optional[Path] = None
     if images_dir.exists():
         for name in sorted(os.listdir(images_dir)):
             if name.lower().endswith((".png", ".jpg", ".jpeg")):
                 thumbnail_path = images_dir / name
                 break
-    return title, description, thumbnail_path
+
+    if aiml_client is None:
+        base_tags = [
+            "documentary", "history", "ancient greece", "ancient rome",
+            "greek history", "roman empire", "classical antiquity",
+        ]
+        title = idea
+        desc = f"Keywords: {', '.join(base_tags)}"
+        return title, _truncate_tags_to_limit(base_tags), desc, thumbnail_path
+
+    meta_context = {
+        "idea": idea,
+        "theme": theme or "",
+        "narration_excerpt": narration[:1200],
+    }
+    prompt = (
+        "You are a YouTube SEO expert. Create high-CTR metadata for a public video.\n"
+        "Return STRICT JSON with keys: title, tags (array), description.\n\n"
+        "Requirements:\n"
+        "- Title: ultra-clickbaity but accurate, <= 95 chars, maximize views, no emojis.\n"
+        "- Tags: many concise, relevant keywords/phrases; include variations and long-tails; no hashtags.\n"
+        "- Description: very short, skimmable, keyword-heavy bullets or lines. Minimal prose; no links.\n"
+        "- Audience: Ancient Greek–Roman history.\n\n"
+        f"Context JSON (for guidance):\n{json.dumps(meta_context, ensure_ascii=False)}\n"
+    )
+
+    try:
+        resp = aiml_client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": "You write viral YouTube SEO metadata. Always output valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=1000,
+        )
+        content = resp.model_dump()["choices"][0]["message"]["content"]
+        data = json.loads(content)
+        title = str(data.get("title") or idea).strip()
+        tags: List[str] = [str(t).strip() for t in data.get("tags", []) if str(t).strip()]
+        description = str(data.get("description") or idea).strip()
+        return title, _truncate_tags_to_limit(tags), description, thumbnail_path
+    except Exception as exc:
+        print(f"Warning: AI metadata generation failed: {exc}", file=sys.stderr)
+        fallback_tags = [
+            "documentary", "history", "ancient greece", "ancient rome",
+            "greek history", "roman empire", "classical antiquity",
+        ]
+        return idea, _truncate_tags_to_limit(fallback_tags), idea, thumbnail_path
 
 
 def _ensure_google_libs_available() -> None:
@@ -212,7 +288,10 @@ def upload_video(
             "categoryId": category_id,
             "tags": tags or [],
         },
-        "status": {"privacyStatus": privacy_status},
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False,
+        },
     }
     media = MediaFileUpload(str(video_path), mimetype="video/mp4", chunksize=-1, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
@@ -238,30 +317,29 @@ def add_to_playlist(youtube, video_id: str, playlist_id: str) -> None:
     youtube.playlistItems().insert(part="snippet", body=body).execute()
 
 
-def upload_latest(output_folder: Optional[str] = None, dry_run: bool = False) -> Optional[str]:
+def upload_latest(output_folder: Optional[str] = None) -> Optional[str]:
     cfg = load_youtube_config()
-    if dry_run:
-        print("[DRY RUN] No changes will be made.")
+    output_dir: Optional[Path] = None
+    final_video_path: Optional[Path] = None
+
     if output_folder:
         out_dir = Path(output_folder)
-        final_tuple = (out_dir, out_dir / "final_video_transitions.mp4")
-        if not final_tuple[1].exists():
-            print(f"Error: final video not found at {final_tuple[1]}", file=sys.stderr)
+        final_video_path = _find_video_in_folder(out_dir)
+        if not final_video_path:
+            print(f"Error: final video not found in {out_dir}", file=sys.stderr)
             return None
+        output_dir = out_dir
     else:
         result = find_latest_final_video()
         if not result:
             print("Error: No final video found in outputs.", file=sys.stderr)
             return None
-        final_tuple = result
+        output_dir, final_video_path = result
 
-    output_dir, final_video_path = final_tuple
-    title, description, thumbnail_path = build_title_and_description(output_dir)
+    title, tags, description, thumbnail_path = ai_generate_youtube_metadata(output_dir)
     print(f"Uploading: {final_video_path}")
     print(f"Title: {title}")
-    print(f"Privacy: {cfg['default_privacy_status']}")
-    if dry_run:
-        return None
+    print("Privacy: public (not made for kids)")
 
     try:
         youtube = get_authenticated_service(
@@ -280,9 +358,9 @@ def upload_latest(output_folder: Optional[str] = None, dry_run: bool = False) ->
             video_path=final_video_path,
             title=title,
             description=description,
-            privacy_status=str(cfg.get("default_privacy_status", "private")),
+            privacy_status="public",
             category_id=str(cfg.get("category_id", "27")),
-            tags=list(cfg.get("tags", [])),
+            tags=tags,
         )
         print(f"✓ Uploaded. Video ID: {video_id}")
 
@@ -290,7 +368,7 @@ def upload_latest(output_folder: Optional[str] = None, dry_run: bool = False) ->
         info = {
             "video_id": video_id,
             "uploaded_at_utc": datetime.utcnow().isoformat() + "Z",
-            "privacy": cfg.get("default_privacy_status", "private"),
+            "privacy": "public",
         }
         with open(output_dir / "youtube_upload.json", "w", encoding="utf-8") as f:
             json.dump(info, f, indent=2)
@@ -302,14 +380,6 @@ def upload_latest(output_folder: Optional[str] = None, dry_run: bool = False) ->
             except HttpError as e:  # type: ignore
                 print(f"Warning: Failed to set thumbnail: {e}", file=sys.stderr)
 
-        playlist_id = str(cfg.get("playlist_id") or "").strip()
-        if playlist_id:
-            try:
-                add_to_playlist(youtube, video_id, playlist_id)
-                print(f"✓ Added to playlist: {playlist_id}")
-            except HttpError as e:  # type: ignore
-                print(f"Warning: Failed to add to playlist: {e}", file=sys.stderr)
-
         return video_id
     except HttpError as e:  # type: ignore
         print(f"YouTube API error: {e}", file=sys.stderr)
@@ -320,12 +390,12 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Upload the latest final video to YouTube")
     parser.add_argument("--output-dir", type=str, default=None, help="Specific output folder to upload from")
     parser.add_argument("--auth", action="store_true", help="Run OAuth flow only and exit")
-    parser.add_argument("--dry-run", action="store_true", help="Print actions without uploading")
+    # no dry-run; pipeline always uploads
     args = parser.parse_args(argv)
 
-    cfg = load_youtube_config()
     if args.auth:
         try:
+            cfg = load_youtube_config()
             get_authenticated_service(cfg["client_secrets_file"], cfg["token_file"])
             print("Auth successful.")
             return 0
@@ -335,7 +405,7 @@ def main(argv: list[str]) -> int:
             print(f"Auth failed: {exc}", file=sys.stderr)
             return 1
 
-    video_id = upload_latest(output_folder=args.output_dir, dry_run=args.dry_run)
+    video_id = upload_latest(output_folder=args.output_dir)
     return 0 if video_id else 2
 
 

@@ -7,58 +7,95 @@ import time
 import concurrent.futures
 from functools import partial
 import sys
+from openai import OpenAI
 
 # Load environment variables from a .env file
 load_dotenv()
 
-# Get the API key from environment variables
+# Get the API key and base URL for AIMLAPI (OpenAI-compatible)
 API_KEY = os.getenv("AIML_API_KEY")
-API_URL = "https://api.aimlapi.com/v1/chat/completions"
+AIML_BASE_URL = os.getenv("AIML_BASE_URL", "https://api.aimlapi.com/v1")
+MODEL_ID = os.getenv("AIML_MODEL_ID", "gpt-4o")
+
+if not API_KEY:
+    print("Warning: AIML_API_KEY is not set. Requests will fail with 401/403.", file=sys.stderr)
+
+# OpenAI-compatible client pointing to AIMLAPI per docs:
+# https://docs.aimlapi.com/api-references/text-models-llm/openai
+aiml_client = OpenAI(api_key=API_KEY, base_url=AIML_BASE_URL)
 
 
-def generate_idea(examples):
+def generate_idea(examples, visual_style: str = "photorealistic"):
     """
     Generates a new documentary idea, theme, and visual style guide using GPT-4o.
+    The visual style guide adapts to the requested visual_style ("photorealistic" or "low_poly").
     
     Returns:
         tuple[str, str, str]: A tuple containing the idea, theme, and visual style guide.
     """
     example_str = ", ".join(examples)
+    style_key = (visual_style or "").strip().lower()
+
+    if style_key in {"low_poly", "low-poly", "low poly", "lowpoly"}:
+        aesthetic_line = (
+            "Aesthetic: Strictly 'low‑poly 3D animation style'. Stylized with clean lines, simple geometric shapes, and flat shading. Absolutely no photorealism."
+        )
+        character_line = (
+            "Character Styling: All humans MUST be depicted in a consistent low‑poly style with simplified, geometric, often faceless features. Avoid realistic, cartoonish, or blocky/lego‑like looks."
+        )
+        env_line = (
+            "Environment & Objects: Minimalist, composed of simple geometric shapes. Avoid clutter; keep strong silhouettes and simple forms."
+        )
+        palette_line = (
+            "Color Palette: A limited palette (e.g., earthy terracottas, marble whites/greys, deep blues/greens) with soft, ambient lighting."
+        )
+    else:
+        # photorealistic default
+        aesthetic_line = (
+            "Aesthetic: Photorealistic documentary look with natural lighting, physically plausible materials, and true‑to‑life textures. Absolutely no low‑poly, cartoon, or stylized looks."
+        )
+        character_line = (
+            "Character Styling: Realistic, human‑like faces and skin tones with natural proportions. Avoid toy‑like, blocky, anime, voxel, or stylized traits."
+        )
+        env_line = (
+            "Environment & Objects: Real‑world materials and details; avoid simplified geometric abstractions. Composition favors clarity and realism over stylization."
+        )
+        palette_line = (
+            "Color Palette: Cinematic yet natural palette appropriate to the scene (e.g., soft daylight, warm interiors, cool evening tones) with plausible shadows and highlights."
+        )
+
     prompt = (
-        f"Generate a new, clickbaity idea for a 3D YouTube documentary, similar to the style of the channel 'fern'. "
+        f"Generate a new, clickbaity idea for a YouTube documentary, similar to the narrative style of the channel 'fern'. "
         f"CRITICAL DOMAIN CONSTRAINT: The topic must be strictly about Ancient Greek–Roman history and adjacent Mediterranean cultures circa 800 BCE–500 CE "
         f"(e.g., Classical and Hellenistic Greece, the Roman Republic and Empire, the Etruscans, Carthage, and interactions with Persia). "
         f"Do NOT include modern topics or cultures outside this region and timeframe. "
         f"The idea should be completely different from these examples: {example_str}. "
         f"Please return the output as a JSON object with three keys: 'idea', 'theme', and 'visual_style_guide'.\n\n"
-        f"1.  **idea**: A single, catchy title for the documentary.\n"
+        f"1.  **idea**: A single, extremely clickbaity title for the documentary, ideally 5-10 words long.\n"
         f"2.  **theme**: 1-3 words describing the mood (e.g., 'Mysterious, suspenseful', 'Dark, academic', 'Ambient, awe-inspiring').\n"
         f"3.  **visual_style_guide**: A detailed paragraph for an art director. This guide is CRITICAL for maintaining consistency. It must define:\n"
-        f"    -   **Aesthetic**: Strictly 'low-poly 3D animation style'. Describe it as 'Stylized with clean lines, simple geometric shapes, and flat shading. Absolutely no photorealism.'\n"
-        f"    -   **Character Styling**: This is the most important rule. All humans MUST be depicted in a consistent low-poly style. They should have simplified, geometric, and often faceless features. CRITICAL: Avoid realistic, cartoonish, or blocky/lego-like looks. Every character in every scene must look like they belong to the same set of low-poly models.\n"
-        f"    -   **Environment & Objects**: Environments and objects must be minimalist, composed of simple geometric shapes. Scenes must not be cluttered to maintain focus.\n"
-        f"    -   **Color Palette**: A specific, limited color palette (e.g., 'Earthy tones with deep blues and greens') with soft, ambient lighting to create a consistent mood.\n\n"
+        f"    -   **{aesthetic_line}**\n"
+        f"    -   **{character_line}**\n"
+        f"    -   **{env_line}**\n"
+        f"    -   **{palette_line}**\n\n"
         f"Your response MUST be a valid JSON object."
     )
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "gpt-4o",
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": "You are a creative assistant that generates viral YouTube video ideas and provides art direction for a low-poly 3D animation style. You must output a valid JSON object."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 4096
-    }
+    try:
+        response = aiml_client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": "You are a creative assistant that generates viral YouTube video ideas and provides art direction for a low-poly 3D animation style. You must output a valid JSON object."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=4096,
+        )
+    except Exception as e:
+        print(f"AIMLAPI request failed: {e}", file=sys.stderr)
+        raise
 
-    response = requests.post(API_URL, headers=headers, json=data)
-    response.raise_for_status()
-    response_json = response.json()
+    response_json = response.model_dump() if hasattr(response, "model_dump") else response
     
     try:
         content_str = response_json['choices'][0]['message']['content']
@@ -74,12 +111,12 @@ def generate_idea(examples):
 
 def generate_narration(idea, style_guide_text):
     """
-    Generates a 3-minute narration script containing only the narrator's speech.
+    Generates a 5-6 minute narration script containing only the narrator's speech.
     """
-    words_for_3_min = 3 * 150
+    words_for_5_to_6_min = int(5.5 * 150) # Average 5.5 minutes at 150 wpm
     prompt = (
-        f"Write a narration script for a 3-minute YouTube documentary about '{idea}'. "
-        f"The script should be approximately {words_for_3_min} words long. "
+        f"Write a narration script for a 5-to-6-minute YouTube documentary about '{idea}'. "
+        f"The script should be approximately {words_for_5_to_6_min} words long. "
         f"**CRITICAL: Output ONLY the words the narrator speaks - nothing else.** "
         f"CRITICAL DOMAIN CONSTRAINT: Keep the narrative strictly within Ancient Greek–Roman history and adjacent Mediterranean cultures circa 800 BCE–500 CE. "
         f"Avoid modern references, technologies, or events outside this region and timeframe. "
@@ -91,118 +128,132 @@ def generate_narration(idea, style_guide_text):
         f"- Music cues or sound descriptions\n"
         f"- Any text in brackets, parentheses, or asterisks\n"
         f"- Production notes or camera directions\n\n"
-        f"Write ONLY what the narrator says aloud, as one continuous flowing narrative. "
+        f"CRITICAL: Write ONLY what the narrator says aloud. Every sentence MUST be between 10 and 15 words long. "
+        f"Allow commas and occasional em-dashes for flow, but keep clarity high and sentence length consistent. "
+        f"Avoid choppy, fragmentary lines; let thoughts complete within sentences. "
+        f"Begin with a brief YouTube-style intro hook (1–2 sentences) that frames the topic and stakes for the viewer. "
         f"Study the example transcript carefully - notice how it's pure narration without any production elements. "
         f"Match that investigative, data-driven style that tells a compelling story with specific details and numbers. "
-        f"Start with an immediate hook that grabs attention like the example does.\n\n"
+        f"Conclude with a natural YouTube call-to-action in one short sentence (e.g., invite the viewer to like, subscribe, and comment), keeping tone consistent and not salesy. "
+        f"Avoid saying channel names or using brackets.\n\n"
         f"Example transcript style to follow:\n\n---\n{style_guide_text}\n---\n"
     )
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "gpt-4o",
-        "messages": [
-            {"role": "system", "content": "You are a scriptwriter for documentaries in the style of 'fern' YouTube channel. You write ONLY the pure narrator's speech - no brackets, no labels, no scene descriptions, no speaker tags. Keep strictly to Ancient Greek–Roman and adjacent Mediterranean history (c. 800 BCE–500 CE). Output only the words spoken aloud by the narrator."},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 4096
-    }
-
-    response = requests.post(API_URL, headers=headers, json=data)
-    response_json = response.json()
+    try:
+        response = aiml_client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": "You are a scriptwriter for documentaries in the style of 'fern' YouTube channel. You write ONLY the pure narrator's speech - no brackets, no labels, no scene descriptions, no speaker tags. Keep strictly to Ancient Greek–Roman and adjacent Mediterranean history (c. 800 BCE–500 CE). Output only the words spoken aloud by the narrator."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=4096,
+        )
+    except Exception as e:
+        print(f"AIMLAPI request failed: {e}", file=sys.stderr)
+        raise
+    response_json = response.model_dump() if hasattr(response, "model_dump") else response
     narration = response_json['choices'][0]['message']['content'].strip()
     return narration
 
-def split_into_phrases(text):
+def split_into_phrases(text: str) -> list[str]:
     """
-    Splits the narration script into a list of short phrases (3-5 seconds).
-    It prioritizes splitting at sentence endings, then at commas in longer phrases.
+    Split narration into natural phrases:
+    - Primary split on sentence enders (. ! ?)
+    - Merge very short trailing sentences (<= 3 words or <= 20 chars) with the previous sentence
+      so fragments like "in the ancient world." attach to the prior phrase.
+    - Do NOT enforce duration limits (removes 3–4 sec caps).
+    - Avoid splitting on commas; keep author-intended sentence rhythm.
     """
-    # An average speaking rate is about 150 words per minute (2.5 words/sec).
-    # For a 3-5 second clip, we'll aim for phrases of about 8-15 words.
-    words = text.replace('\n', ' ').split()
-    phrases = []
-    current_phrase = ""
+    if not text or not text.strip():
+        return []
 
-    for word in words:
-        if not current_phrase:
-            current_phrase = word
+    single_line = re.sub(r"\s+", " ", text.strip())
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", single_line) if s.strip()]
+
+    def is_tiny_fragment(s: str) -> bool:
+        words = re.findall(r"\b\w+[\w'-]*\b", s)
+        return len(words) <= 3 or len(s) <= 20
+
+    merged: list[str] = []
+    for s in sentences:
+        if merged and is_tiny_fragment(s):
+            merged[-1] = f"{merged[-1]} {s}".strip()
         else:
-            current_phrase += " " + word
+            merged.append(s)
 
-        # Prioritize splitting at sentence endings ('.', '!', '?').
-        if word.endswith(('.', '!', '?')):
-            phrases.append(current_phrase)
-            current_phrase = ""
-        # If the phrase is getting long, split at a comma.
-        elif len(current_phrase.split()) >= 8 and word.endswith(','):
-            phrases.append(current_phrase)
-            current_phrase = ""
-        # Force a split if the phrase gets too long without any natural break.
-        elif len(current_phrase.split()) >= 15:
-            phrases.append(current_phrase)
-            current_phrase = ""
+    # Final tidy-up: collapse stray spaces
+    return [m.strip() for m in merged if m.strip()]
 
-    # Add any remaining words as the last phrase.
-    if current_phrase:
-        phrases.append(current_phrase)
-        
-    return phrases
-
-def _generate_single_prompt(phrase_with_index, theme, visual_style_guide):
+def _generate_single_prompt(phrase_with_index, theme, visual_style_guide, idea, visual_style: str = "photorealistic"):
     """
     Helper function to generate a single prompt that adheres to a theme and style guide.
     """
     i, phrase = phrase_with_index
-    prompt_for_flux = (
-        f"You are a creative director for a high-quality 3D animated YouTube documentary. "
-        f"Your task is to create a single, detailed visual prompt for a text-to-image model (FLUX) based on the following narration phrase. "
-        f"The resulting image should feel like a still frame from a cinematic animation.\n\n"
-        f"**Narration Phrase:** \"{phrase}\"\n\n"
-        f"**Instructions for the visual prompt:**\n"
-        f"1.  **Cinematic Composition:** Describe the scene from a specific camera perspective. Use terms like 'wide shot', 'extreme close-up', 'worm's-eye view', or 'aerial shot'. Emphasize a strong focal point and use principles like the rule of thirds to create a visually compelling composition.\n"
-        f"2.  **Mood and Lighting:** The lighting must match the emotional tone of the narration. Use descriptive terms like 'dramatic and shadowy', 'soft and ethereal', 'warm and nostalgic', or 'cold and clinical'. Describe how light and shadow interact with the objects.\n"
-        f"3.  **Visual Style Guide Adherence:** You MUST strictly follow this guide:\n{visual_style_guide}\n"
-        f"4.  **Core Style:** The art style is 'low-poly animation'. This means clean, geometric shapes and sharp edges. It is crucial to AVOID photorealism, high-frequency textures, and excessive detail. The final image must not contain characters that look like 'Lego' figures, toys, or have a 'blocky' or 'Minecraft' appearance.\n"
-        f"5.  **Creative Interpretation:** Your primary goal is to avoid visual repetition. Do not default to simple scenes of a figure looking at a planet. Think metaphorically and abstractly. How can you visually represent the *concept* in the narration? Consider creating scenes with symbolic machinery, abstract data visualizations, impossible architecture, or metaphorical landscapes that relate to the narration. Surprise the viewer with a creative, non-obvious interpretation.\n"
-        f"6.  **Focused Detail:** Be very specific about the appearance and position of the main subject. The background should be simpler and support the main subject without distracting from it.\n"
-        f"7.  **Human Count Constraint:** If humans are present, include at most three human-like figures in total. Avoid crowds, groups larger than three, duplicated figures, or background silhouettes that increase the count. Prefer a single subject or a small group of up to three.\n"
-        f"8.  **Output Format:** The prompt must be a single, relatively simple paragraph. It must begin with the documentary's theme, followed by a description of what is visible in the frame. Your entire response must ONLY be this prompt text.\n\n"
-        f"Theme: \"{theme}\"\n"
-        f"CRITICAL: Generate the prompt now. Do not include any introductory text, labels, or markdown like '**Visual Prompt:**'."
-    )
+    style_key = (visual_style or "").strip().lower()
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": "gpt-4o",
-        "messages": [
-            {"role": "system", "content": "You are an expert in writing prompts for AI image and video generation models. You create purely visual prompts for a low-poly 3D animation style. You MUST include instructions for smooth camera movement and ensure any human figures are described as static (no movement). Your primary goal is to ensure visual consistency, simplicity, and contextual accuracy."},
-            {"role": "user", "content": prompt_for_flux}
-        ],
-        "max_tokens": 4096
-    }
-    
+    # Define style-specific system messages and prompt instructions
+    if style_key in {"low_poly", "low-poly", "lowpoly", "low poly"}:
+        system_message_content = (
+            "You are an expert in writing prompts for AI image and video generation models. "
+            "Your task is to create purely visual prompts for a low-poly 3D animation style. "
+            "You must translate a given narration sentence into a compelling, static visual scene. "
+            "Your primary goal is to ensure visual consistency, simplicity, and direct contextual relevance to the narration."
+        )
+        prompt_for_flux = (
+            f"Your task is to create a single, concise visual prompt for a cinematic scene. This scene must be a direct and compelling visualization of the following narration sentence: \"{phrase}\". "
+            f"The scene is for a low-poly 3D documentary titled '{idea}' with a '{theme}' tone. "
+            f"Use plain, concrete language. Describe only what is visible; avoid metaphors, poetic wording, and implied sounds. "
+            f"Do not use the words 'shot', 'frame', or 'series'. "
+            f"Include one cinematic composition term (e.g., wide shot, extreme close-up, aerial). Specify the main subject, clear colors/materials, and a minimal background. "
+            f"Match mood and lighting to the phrase. Indicate camera‑only movement (parallax feel) and keep all subjects/objects static. "
+            f"If humans are present, describe simple clothing colors and forms; no silhouettes or blacked‑out figures. "
+            f"Strictly follow this visual style guide:\n{visual_style_guide}\n"
+            f"Constraints: low‑poly only; at most three people in frame; avoid crowds; static human figures; avoid complex textures; avoid photorealism; no moving subjects or objects; no silhouettes. "
+            f"Output ONLY the final prompt text, without labels or markdown."
+        )
+    else:  # photorealistic default
+        system_message_content = (
+            "You are an expert in writing prompts for AI image and video generation models. "
+            "Your task is to create purely visual prompts for a photorealistic documentary. "
+            "You must translate a given narration sentence into a compelling, cinematic, and realistic visual scene with static subjects. "
+            "Use simple, direct language. Avoid metaphors. Focus on clear, concrete descriptions."
+        )
+        prompt_for_flux = (
+            f"CRITICAL: Start with a 'slow parallax shot'. This is mandatory. "
+            f"Your task is to create a single, concise visual prompt for a cinematic scene. This scene must be a direct and compelling visualization of the following narration sentence: \"{phrase}\". "
+            f"The scene is for a photorealistic documentary titled '{idea}' with a '{theme}' tone. "
+            f"Use plain, concrete language. Describe only what is visible; avoid metaphors, poetic wording, and implied sounds. "
+            f"Do not use the words 'shot', 'frame', or 'series'. "
+            f"Include one cinematic composition term (e.g., wide shot, extreme close-up, aerial). Specify the main subject, clear colors/materials, and a minimal background. "
+            f"Match mood and lighting to the phrase. Emphasize cinematic, realistic lighting (e.g., 'golden hour', 'Rembrandt lighting') and specify realistic surface textures (e.g., 'rough-hewn stone', 'polished marble'). "
+            f"There should be no fast camera movements, and any people in the scene should have static, non-moving hands. "
+            f"Faces must be in high definition and as realistic as possible. "
+            f"When describing people, use simple, direct terms. For women, describe their key characteristics, such as facial features, posture, and clothing, instead of just the environment. "
+            f"If people are present, specify skin tone and clothing colors; no silhouettes or blacked-out figures. "
+            f"Constraints: photorealistic, true human‑like faces and skin; natural materials and lighting; at most three people in frame; avoid crowds; avoid cartoon, anime, toy, low‑poly, blocky, lego, voxel, stylized, or illustrated looks; no moving subjects or objects; no silhouettes. "
+            f"Output ONLY the final prompt text, without labels or markdown."
+        )
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = requests.post(API_URL, headers=headers, json=data, timeout=60)
-            response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
-            response_json = response.json()
+            start_time = time.time()
+            response = aiml_client.chat.completions.create(
+                model=MODEL_ID,
+                messages=[
+                    {"role": "system", "content": system_message_content},
+                    {"role": "user", "content": prompt_for_flux},
+                ],
+                max_tokens=4096,
+            )
+            response_json = response.model_dump() if hasattr(response, "model_dump") else response
             flux_prompt = response_json['choices'][0]['message']['content'].strip()
             # Clean up any residual markdown or prefixes from the model's output
             flux_prompt = re.sub(r'^\*+.*?\*+[:\s]*', '', flux_prompt)
             end_time = time.time()
             request_time = end_time - start_time
             return (i, flux_prompt, request_time)
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             print(f"Error for phrase {i+1} on attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt) # Exponential backoff
@@ -211,7 +262,7 @@ def _generate_single_prompt(phrase_with_index, theme, visual_style_guide):
     
     return (i, "Error generating prompt.", 0)
 
-def generate_flux_prompts(phrases, theme, visual_style_guide):
+def generate_flux_prompts(phrases, theme, visual_style_guide, idea=None, visual_style: str = "photorealistic"):
     """
     Generates a single, visual prompt for each phrase concurrently, adhering to a theme.
     
@@ -225,8 +276,14 @@ def generate_flux_prompts(phrases, theme, visual_style_guide):
     print(f"Generating {len(phrases)} prompts concurrently with theme '{theme}'...")
     start_total_time = time.time()
     
-    # Use functools.partial to pass the theme and style guide to the worker function
-    worker_func = partial(_generate_single_prompt, theme=theme, visual_style_guide=visual_style_guide)
+    # Use functools.partial to pass theme, style guide, idea, and visual_style to the worker function
+    worker_func = partial(
+        _generate_single_prompt,
+        theme=theme,
+        visual_style_guide=visual_style_guide,
+        idea=idea,
+        visual_style=visual_style,
+    )
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         phrases_with_indices = list(enumerate(phrases))

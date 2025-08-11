@@ -71,6 +71,33 @@ python src/run_pipeline.py
 
 The script will print its progress to the console, and you can find the final output in a newly created folder inside the `/outputs` directory.
 
+## Quick TTS with Chatterbox
+
+The script `src/tts_chatterbox.py` generates an MP3 from input text.
+
+Defaults:
+- Exaggeration: 0.4
+- Temperature: 0.5
+- Appends a trailing comma and period by default
+- Appends 300 ms of silence at the end
+
+Run without explicitly using the virtual environment (assumes `python` on PATH):
+
+```bash
+python src/tts_chatterbox.py "Hello there" --out-dir outputs/tts --filename hello.mp3
+```
+
+Optional flags (override defaults):
+- `--temperature 0.6`
+- `--exaggeration 0.8`
+- `--cfg-weight 0.6`
+- `--top-p 0.9`
+- `--min-p 0.05`
+- `--repetition-penalty 1.2`
+- `--audio-prompt my_voice.wav`
+- `--end-silence-ms 150`
+- `--append-comma` / `--append-dot` (both default to on)
+
 ## YouTube Upload (Optional)
 
 Add one-click upload of the latest final video to YouTube.

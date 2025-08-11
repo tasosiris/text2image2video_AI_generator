@@ -20,6 +20,8 @@ build/
 secrets.yml
 *.pem
 *.key
+config/client_secret.json
+config/youtube_token.json
 
 # IDE
 .vscode/
@@ -37,3 +39,26 @@ secrets.yml
 # Other
 /config/LTXV_workflow_optimized.json
 .DS_Store
+
+# Browser automation profiles (local-only, extremely large)
+config/chrome_profile/
+config/firefox_profile/
+config/playwright_profile/
+
+# Local config (keep example files tracked)
+config/youtube_config.json
+*.log
+
+# Media artifacts and large binaries
+music/
+*.webm
+*.wav
+# Keep these local; do not commit heavy template binaries
+templates/*.mp3
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+coverage/
+htmlcov/
+.cache/

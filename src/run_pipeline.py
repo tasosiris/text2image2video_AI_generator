@@ -28,7 +28,25 @@ from documentary_generator import (
     generate_idea, generate_narration, split_into_phrases,
     generate_flux_prompts, save_to_json
 )
-from narrate import narrate_phrases
+# Preserve old Deepgram-based narrate as `narrate_deepgram` and switch default to Chatterbox
+from narrate import narrate_phrases  # now chatterbox-backed (same interface)
+import importlib
+try:
+    narrate_deepgram = importlib.import_module('narrate_deepgram')
+except Exception:
+    narrate_deepgram = None
+try:
+    # Palindrome tripling for videos
+    from triple_videos import main as triple_videos_main
+except Exception:
+    triple_videos_main = None
+try:
+    # Optional YouTube upload integration
+    from upload_youtube import upload_latest as youtube_upload_latest
+    from upload_youtube import load_youtube_config as youtube_load_config
+except Exception:
+    youtube_upload_latest = None
+    youtube_load_config = None
 
 # --- ComfyUI API Configuration ---
 API_BASE = "http://127.0.0.1:8188"
@@ -106,6 +124,21 @@ def upload_image_to_comfy(filepath: str) -> str:
         resp.raise_for_status()
         return resp.json()['name']
 
+def set_workflow_image_resolution(workflow: dict, width: int, height: int) -> None:
+    """Set width/height on all nodes that expose these inputs (best-effort)."""
+    try:
+        for node in workflow.values():
+            if isinstance(node, dict):
+                inputs = node.get("inputs", {})
+                if isinstance(inputs, dict):
+                    if "width" in inputs:
+                        inputs["width"] = width
+                    if "height" in inputs:
+                        inputs["height"] = height
+    except Exception as _:
+        # best-effort; if structure differs, skip silently
+        pass
+
 # ─── PIPELINE STAGES ────────────────────────────────────────────────────────────
 
 def run_documentary_generation():
@@ -119,7 +152,7 @@ def run_documentary_generation():
     ]
     try:
         print("Generating a new documentary idea, theme, and style guide...")
-        idea, theme, visual_style_guide = generate_idea(example_topics)
+        idea, theme, visual_style_guide = generate_idea(example_topics, visual_style=os.getenv("VISUAL_STYLE", "photorealistic"))
         print(f"Generated Idea: {idea}")
         print(f"Theme: {theme}")
         print(f"Visual Style Guide: {visual_style_guide}")
@@ -136,7 +169,13 @@ def run_documentary_generation():
         narration_phrases = split_into_phrases(narration_script)
         
         print("\nGenerating FLUX prompts for each phrase...")
-        flux_prompts, prompt_timings = generate_flux_prompts(narration_phrases, theme, visual_style_guide)
+        flux_prompts, prompt_timings = generate_flux_prompts(
+            narration_phrases,
+            theme,
+            visual_style_guide,
+            idea=idea,
+            visual_style=os.getenv("VISUAL_STYLE", "photorealistic"),
+        )
         
         output_folder = save_to_json(idea, theme, visual_style_guide, narration_script, narration_phrases, flux_prompts)
         
@@ -165,6 +204,30 @@ def run_visual_generation(doc_output_folder: str, prompt_timings: list):
         print(f"Error: Could not load workflow file. {e}", file=sys.stderr)
         return
 
+    # Ensure generated images are HD 1280x720
+    set_workflow_image_resolution(t2i_workflow, width=1280, height=720)
+
+    # Style-specific negative prompts (shared + style-differentiated)
+    style_key = (os.getenv("VISUAL_STYLE", "photorealistic") or "").strip().lower()
+    common_negatives = (
+        "text, letters, words, signage, watermark, blurry, motion blur, out of focus, low resolution, pixelated, "
+        "noisy, low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, "
+        "fused fingers, duplicate body parts, duplicate hands, duplicate legs, extra limbs, extra fingers, malformed hands, mutated hands, poorly drawn hands, "
+        "bad anatomy, weird hand, ugly, silhouette, blacked-out figure, pure black figure, crowd, crowds, many people, large group"
+    )
+    if style_key in {"low_poly", "low-poly", "low poly", "lowpoly"}:
+        style_negatives = (
+            ", photorealism, photorealistic, realistic, realistic skin, realistic textures, lifelike faces, detailed pores, "
+            "glossy materials, high-frequency textures"
+        )
+    else:
+        # photorealistic default
+        style_negatives = (
+            ", cartoon, anime, toy, low-poly, low poly, blocky, lego, voxel, stylized, illustration, cel-shaded, comic"
+        )
+    t2i_negative = common_negatives + style_negatives
+    i2v_negative = common_negatives + style_negatives
+
     # --- Load scene data ---
     json_path = os.path.join(doc_output_folder, "documentary_data.json")
     with open(json_path, 'r', encoding='utf-8') as f: data = json.load(f)
@@ -188,7 +251,7 @@ def run_visual_generation(doc_output_folder: str, prompt_timings: list):
         if not prompt: continue
         
         t2i_workflow[T2I_PROMPT_NODE_ID]["inputs"]["text"] = prompt
-        t2i_workflow["33"]["inputs"]["text"] = "lego, toy, blocky, minecraft style, boxxy figures, blurry, motion blur, out of focus, low resolution, pixelated, noisy, text, letters, words, signage, watermark, ugly, deformed, disfigured, bad anatomy, duplicate body parts, extra limbs, extra legs, duplicate hands, duplicate legs, extra fingers, fused fingers, malformed hands, mutated hands, poorly drawn hands, Photorealism, cluttered backgrounds, facial detail, glossy materials, high-frequency textures, decals, crowds, soft shading, smooth organic curves, cartoon exaggeration, busy compositions, LEGO-like shapes, reflective surfaces, bright modern overlays, excessive detail in small objects, complex patterns, low quality, worst quality, distorted, motion smear, motion artifacts, weird hand."
+        t2i_workflow["33"]["inputs"]["text"] = t2i_negative
         prompt_id = queue_comfy_workflow(t2i_workflow, client_id)
         print(f"Queued image {scene_num}/{len(scenes)}. Prompt ID: {prompt_id}")
         
@@ -225,7 +288,7 @@ def run_visual_generation(doc_output_folder: str, prompt_timings: list):
         server_filename = upload_image_to_comfy(image_path)
         i2v_workflow[I2V_IMAGE_NODE_ID]["inputs"]["image"] = server_filename
         i2v_workflow[I2V_POS_PROMPT_NODE_ID]["inputs"]["text"] = prompt
-        i2v_workflow[I2V_NEG_PROMPT_NODE_ID]["inputs"]["text"] = "text, letters, words, signage, watermark, blurry, motion blur, out of focus, low resolution, pixelated, noisy, low quality, worst quality, deformed, distorted, disfigured, motion smear, motion artifacts, fused fingers, bad anatomy, weird hand, ugly"
+        i2v_workflow[I2V_NEG_PROMPT_NODE_ID]["inputs"]["text"] = i2v_negative
         
         start_i2v_time = time.time()
         prompt_id = queue_comfy_workflow(i2v_workflow, client_id)
@@ -253,14 +316,34 @@ def run_visual_generation(doc_output_folder: str, prompt_timings: list):
     print(f"\nTotal visual generation complete in {time.time() - start_time_visuals:.2f} seconds.")
     print(f"Asset manifest saved to '{manifest_path}'")
 
-def run_narration_generation(doc_output_folder: str, narration_phrases: list):
+def run_narration_generation(
+    doc_output_folder: str,
+    narration_phrases: list,
+    audio_prompt_path: str = None,
+    force_regeneration: bool = False,
+):
     """
     Generates narration audio files from the narration script.
     """
     print("\n--- Step 3: Generating Narration Audio ---")
     start_time_narration = time.time()
     try:
-        narrate_phrases(narration_phrases, doc_output_folder)
+        # Default: chatterbox (same filenames/locations). If needed, you can call
+        # narrate_deepgram.narrate_phrases(...) elsewhere to use the old engine.
+        # Match settings from test_narration.py
+        narrate_phrases(
+            phrases=narration_phrases,
+            output_dir=doc_output_folder,
+            audio_prompt_path=audio_prompt_path,
+            force_regeneration=force_regeneration,
+            exaggeration=0.5,
+            temperature=0.7,
+            cfg_weight=0.01,
+            top_p=1.0,
+            min_p=0.05,
+            repetition_penalty=1.2,
+            end_silence_ms=0,
+        )
         elapsed_time = time.time() - start_time_narration
         print(f"\nNarration audio generation complete in {elapsed_time:.2f} seconds.")
     except Exception as e:
@@ -273,10 +356,13 @@ def run_video_assembly(output_folder):
     """
     print(f"\n--- Step 4: Assembling Final Video for: {os.path.basename(output_folder)} ---")
 
-    videos_dir = os.path.join(output_folder, "videos")
+    tripled_dir = os.path.join(output_folder, "tripled_videos")
+    videos_dir_fallback = os.path.join(output_folder, "videos")
+    videos_dir = tripled_dir if os.path.isdir(tripled_dir) else videos_dir_fallback
     narration_dir = os.path.join(output_folder, "narration")
     temp_dir = os.path.join(output_folder, "temp_assembly")
     final_video_path = os.path.join(output_folder, "final_video_transitions.mp4")
+    final_video_with_music_path = os.path.join(output_folder, "final_video_with_music.mp4")
 
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -302,11 +388,25 @@ def run_video_assembly(output_folder):
             audio_duration = float(subprocess.check_output(cmd_audio_duration).strip())
             
             ffmpeg_cmd = []
+            # Add gentle audio fades and a small silence pad to avoid abrupt cuts
+            fade_out_dur = 0.15
+            fade_in_dur = 0.05
+            pad_silence = 0.10
+            fade_out_start = max(audio_duration - fade_out_dur, 0.0)
+            whole_dur = audio_duration + pad_silence
+            audio_filters = (
+                f"adelay=1000|1000," # 1-second delay for the narration
+                f"afade=t=in:st=0:d={fade_in_dur},"
+                f"afade=t=out:st={fade_out_start:.3f}:d={fade_out_dur},"
+                f"apad=whole_dur={whole_dur:.3f}"
+            )
+
             if audio_duration > video_duration:
                 print(f"  Audio is longer, freezing last frame of video to match audio duration ({audio_duration:.2f}s)")
                 ffmpeg_cmd = [
                     "ffmpeg", "-i", video_path, "-i", audio_path,
                     "-vf", f"tpad=stop_mode=clone:stop_duration={audio_duration - video_duration},fps=24,format=yuv420p",
+                    "-af", audio_filters,
                     "-c:v", "libx264", "-c:a", "aac", "-shortest", "-y", output_path
                 ]
             else:
@@ -314,6 +414,7 @@ def run_video_assembly(output_folder):
                 ffmpeg_cmd = [
                     "ffmpeg", "-i", video_path, "-i", audio_path,
                     "-vf", "fps=24,format=yuv420p",
+                    "-af", audio_filters,
                     "-t", str(audio_duration),
                     "-c:v", "libx264", "-c:a", "aac", "-y", output_path
                 ]
@@ -353,38 +454,171 @@ def run_video_assembly(output_folder):
     print("\nStep 3: Cleaning up temporary files...")
     shutil.rmtree(temp_dir)
     print("✓ Cleanup completed")
-    print(f"\n--- Final video assembly completed: {final_video_path} ---")
+
+    # Step 4: Mix background music and add fades
+    try:
+        if not os.path.exists(final_video_path):
+            print(f"Error: Concatenated video not found at '{final_video_path}'. Skipping music and fade.", file=sys.stderr)
+            return
+
+        # Get video duration for fade-out calculation
+        cmd_duration = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", final_video_path]
+        video_duration_str = subprocess.check_output(cmd_duration).strip().decode('utf-8')
+        video_duration = float(video_duration_str)
+
+        # Add 2 seconds of padding at the end
+        video_duration += 2
+
+        project_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        music_dir = os.path.join(project_root, "music")
+        music_candidates = []
+        if os.path.isdir(music_dir):
+            for ext in ("*.mp3", "*.wav", "*.webm", "*.m4a", "*.ogg"):
+                music_candidates.extend(glob.glob(os.path.join(music_dir, ext)))
+        
+        fade_duration = 1.5
+        fade_out_start = video_duration - fade_duration
+        video_fade_filter = f"fade=type=in:duration={fade_duration},fade=type=out:start_time={fade_out_start}:duration={fade_duration}"
+
+        if music_candidates:
+            music_track = random.choice(music_candidates)
+            print(f"Adding fades and background music: {os.path.basename(music_track)} at 12% volume, starting from 10s.")
+            
+            # Note: Re-encoding video is necessary for fades. Removed -c:v copy.
+            mix_cmd = [
+                "ffmpeg",
+                "-i", final_video_path,
+                "-stream_loop", "-1",
+                "-ss", "10",
+                "-i", music_track,
+                "-filter_complex",
+                f"[0:v]{video_fade_filter}[v];"
+                f"[1:a]volume=0.12[a1];[0:a][a1]amix=inputs=2:duration=first:dropout_transition=0,"
+                f"afade=t=in:d={fade_duration},afade=t=out:st={fade_out_start}:d={fade_duration}[aout]",
+                "-map", "[v]",
+                "-map", "[aout]",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-shortest",
+                "-y", final_video_with_music_path,
+            ]
+            subprocess.run(mix_cmd, check=True, capture_output=True, text=True)
+            print(f"✓ Final video with music and fades saved to: {final_video_with_music_path}")
+        else:
+            print("No music files found; applying video fades only.")
+            fade_only_cmd = [
+                "ffmpeg",
+                "-i", final_video_path,
+                "-vf", video_fade_filter,
+                "-af", f"afade=t=in:d={fade_duration},afade=t=out:st={fade_out_start}:d={fade_duration}",
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-y", final_video_with_music_path,
+            ]
+            subprocess.run(fade_only_cmd, check=True, capture_output=True, text=True)
+            print(f"✓ Final video with fades saved to: {final_video_with_music_path}")
+
+        # Remove the intermediate file to ensure the version with music/fades is uploaded
+        try:
+            if os.path.exists(final_video_path):
+                print(f"Removing intermediate file: {os.path.basename(final_video_path)}")
+                os.remove(final_video_path)
+                print("✓ Intermediate file removed.")
+        except OSError as e:
+            print(f"Warning: Could not remove intermediate file {final_video_path}: {e}", file=sys.stderr)
+            
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Error while adding fades and/or music: {e.stderr}", file=sys.stderr)
+    except Exception as e:
+        print(f"✗ Unexpected error while adding fades and/or music: {e}", file=sys.stderr)
+
+    print(f"\n--- Final video assembly completed: {final_video_with_music_path if os.path.exists(final_video_with_music_path) else final_video_path} ---")
 
 
 if __name__ == "__main__":
-    total_pipeline_start_time = time.time()
-    documentary_output_dir, all_prompt_timings, narration_phrases = run_documentary_generation()
-    if documentary_output_dir:
-        # Run visual and narration generation in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit visual generation to the executor
-            visual_future = executor.submit(run_visual_generation, documentary_output_dir, all_prompt_timings)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Main pipeline script to generate a complete documentary from an idea.")
+    parser.add_argument("--audio_prompt_path", type=str, default="templates/voice_template_smooth.mp3", help="Path to an audio file to use as a voice prompt for narration.")
+    parser.add_argument("--regenerate_narration", type=str, help="Path to a project's output folder to regenerate only the narration.")
+    parser.add_argument("--force", action="store_true", help="Force regeneration of existing files.")
+    args = parser.parse_args()
+
+    if args.regenerate_narration:
+        project_folder = args.regenerate_narration
+        json_path = os.path.join(project_folder, "documentary_data.json")
+        if not os.path.exists(json_path):
+            print(f"Error: Could not find 'documentary_data.json' in '{project_folder}'", file=sys.stderr)
+            sys.exit(1)
+        
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        narration_phrases = [scene['phrase'] for scene in data.get('scenes', [])]
+        
+        if not narration_phrases:
+            print("No narration phrases found in the project.", file=sys.stderr)
+            sys.exit(1)
             
-            # Submit narration generation to the executor
-            narration_future = executor.submit(run_narration_generation, documentary_output_dir, narration_phrases)
+        run_narration_generation(project_folder, narration_phrases, args.audio_prompt_path, force_regeneration=args.force)
+        print("\n--- Narration regeneration complete. ---")
 
-            # Wait for both tasks to complete
-            concurrent.futures.wait([visual_future, narration_future])
-
-            # Optionally, check for exceptions
-            try:
-                visual_future.result()
-            except Exception as e:
-                print(f"Visual generation failed: {e}", file=sys.stderr)
-            
-            try:
-                narration_future.result()
-            except Exception as e:
-                print(f"Narration generation failed: {e}", file=sys.stderr)
-
-        run_video_assembly(documentary_output_dir)
-        total_pipeline_time = time.time() - total_pipeline_start_time
-        print(f"\n--- Pipeline Finished in {total_pipeline_time:.2f} seconds ---")
     else:
-        print("\n--- Pipeline Aborted ---", file=sys.stderr)
-        sys.exit(1)
+        total_pipeline_start_time = time.time()
+        documentary_output_dir, all_prompt_timings, narration_phrases = run_documentary_generation()
+        if documentary_output_dir:
+            # Run visual and narration generation in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit visual generation to the executor
+                visual_future = executor.submit(run_visual_generation, documentary_output_dir, all_prompt_timings)
+                
+                # Submit narration generation to the executor
+                narration_future = executor.submit(run_narration_generation, documentary_output_dir, narration_phrases, args.audio_prompt_path)
+
+                # Wait for both tasks to complete
+                concurrent.futures.wait([visual_future, narration_future])
+
+                # Optionally, check for exceptions
+                try:
+                    visual_future.result()
+                except Exception as e:
+                    print(f"Visual generation failed: {e}", file=sys.stderr)
+                
+                try:
+                    narration_future.result()
+                except Exception as e:
+                    print(f"Narration generation failed: {e}", file=sys.stderr)
+
+            # After visuals are generated, create tripled (forward-reverse-forward) clips
+            if triple_videos_main is not None:
+                try:
+                    print("\n--- Step 3.5: Tripling videos with f-r-f effect ---")
+                    rc = triple_videos_main(["--output-folder", documentary_output_dir])
+                    if rc != 0:
+                        print(f"Warning: Tripling videos returned non-zero exit code: {rc}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Tripling videos failed: {e}", file=sys.stderr)
+
+            run_video_assembly(documentary_output_dir)
+            total_pipeline_time = time.time() - total_pipeline_start_time
+            print(f"\n--- Pipeline Finished in {total_pipeline_time:.2f} seconds ---")
+
+            # Always attempt YouTube upload and write a note on success
+            try:
+                if youtube_upload_latest is not None:
+                    print("\n--- Uploading final video to YouTube ---")
+                    video_id = youtube_upload_latest(output_folder=documentary_output_dir)
+                    if video_id:
+                        note_path = os.path.join(documentary_output_dir, "uploaded_to_youtube.txt")
+                        with open(note_path, "w", encoding="utf-8") as f:
+                            f.write(f"Uploaded to YouTube. Video ID: {video_id}\n")
+                        print(f"✓ Wrote upload note: {note_path}")
+                    else:
+                        print("YouTube upload did not return a video ID; no note written.", file=sys.stderr)
+                else:
+                    print("YouTube uploader unavailable; skipping upload.", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: YouTube upload step failed: {e}", file=sys.stderr)
+        else:
+            print("\n--- Pipeline Aborted ---", file=sys.stderr)
+            sys.exit(1)
