@@ -2,7 +2,8 @@ import argparse
 import os
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
+import threading
 
 try:
     import torch
@@ -27,6 +28,30 @@ def slugify_filename(text: str, max_words: int = 8) -> str:
     return f"{base[:60]}-{timestamp}.mp3"
 
 
+_MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
+
+
+def _get_or_load_model(resolved_device: str):
+    try:
+        from chatterbox.tts import ChatterboxTTS  # type: ignore
+    except Exception as exc:
+        print(
+            "Missing dependency: chatterbox-tts. Install with: pip install chatterbox-tts",
+            file=sys.stderr,
+        )
+        raise
+
+    # Load once per device
+    with _MODEL_CACHE_LOCK:
+        model = _MODEL_CACHE.get(resolved_device)
+        if model is None:
+            print("[TTS] Loading Chatterbox model (cached per device)...", flush=True)
+            model = ChatterboxTTS.from_pretrained(device=resolved_device)
+            _MODEL_CACHE[resolved_device] = model
+    return model
+
+
 def synthesize_with_chatterbox(
     text: str,
     device: Optional[str] = None,
@@ -39,26 +64,12 @@ def synthesize_with_chatterbox(
     min_p: float = 0.05,
     repetition_penalty: float = 1.2,
 ):
-    try:
-        from chatterbox.tts import ChatterboxTTS  # type: ignore
-    except Exception as exc:
-        print(
-            "Missing dependency: chatterbox-tts. Install with: pip install chatterbox-tts",
-            file=sys.stderr,
-        )
-        raise
-
     resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"[TTS] Using device: {resolved_device}", flush=True)
-    print(
-        "[TTS] Loading Chatterbox model... If this is your first run, required models will be downloaded.\n"
-        "      This can take several minutes depending on your internet speed.",
-        flush=True,
-    )
-    # Load model (this may trigger downloads on first run)
-    model = ChatterboxTTS.from_pretrained(device=resolved_device)
-    print("[TTS] Model loaded and ready.", flush=True)
+    # Load or reuse model (first run may download weights)
+    model = _get_or_load_model(resolved_device)
+    print("[TTS] Model ready (cached).", flush=True)
 
     # Generate waveform
     # API may accept voice/name if provided; pass only when set to avoid errors on older versions

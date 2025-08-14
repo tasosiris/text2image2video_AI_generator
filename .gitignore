@@ -29,8 +29,9 @@ config/youtube_token.json
 *.suo
 *.ntvs*
 
-# Outputs
+# Outputs (generated artifacts)
 /outputs/
+!/outputs/README.md
 /documentary_output/
 /documentary_source/
 *.png
@@ -55,6 +56,11 @@ Crashpad/
 # Media files
 music/
 templates/*.mp3
+
+# Local runs
+*.srt
+*.json
+*.txt
 
 # Weird files
 e -i *
