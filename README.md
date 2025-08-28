@@ -137,3 +137,49 @@ To auto-upload at the end of the pipeline, set `"auto_upload": true` in `config/
 ├── README.md           # This file.
 └── requirements.txt    # Python dependencies.
 ```
+
+## Fully Automated UGC Video Generation
+
+The script `src/ugc/upload_to_wangp.py` provides a powerful, end-to-end automation for generating User-Generated Content (UGC) style videos using a local Gradio web application. It intelligently finds the latest creative assets, calculates the precise video length based on audio duration, and drives the web UI to generate a video.
+
+### How It Works
+
+The script automates the entire process from asset collection to final video generation:
+
+1.  **Find Latest Audio File**: Before any browser interaction, the script automatically searches the `outputs/ugc_scripts/Emily_Carter/` directory to find the most recently created subfolder. It then locates the `scene_001.mp3` narration file within that folder. This ensures it always uses the latest audio without any manual path updates.
+
+2.  **Calculate Precise Frame Count**:
+    *   It reads the exact duration of the located audio file (e.g., 3.36 seconds).
+    *   Using a configurable frame rate (defaulting to 25 FPS), it calculates the ideal number of frames required for the video (e.g., `3.36s * 25fps = 84 frames`).
+    *   Crucially, it then adjusts this number to be compatible with the AI model's specific requirements (ensuring `frames - 1` is a multiple of 4), preventing common errors. For 84 frames, it would adjust to 85.
+
+3.  **Drive the Web UI**: The script launches a Playwright-controlled Chromium browser and performs the following actions on the Gradio application running at `http://localhost:7860`:
+    *   Uploads a default settings file (`UGC_defaults.json`).
+    *   Waits 3 seconds.
+    *   Uploads the reference image (`photo_1.png`).
+    *   Uploads the `scene_001.mp3` audio file.
+    *   Waits 3 seconds.
+    *   Inputs the precisely calculated frame count into the correct field.
+    *   Waits 1 second.
+    *   Clicks the "Generate" button.
+
+4.  **Wait for Completion**: Instead of a fixed wait time, the script intelligently monitors the output directory (`C:\Users\tasos\Code\HunyuanVideo\Wan2GP\outputs`). It checks every 5 seconds for a new `.mp4` file created after the "Generate" button was clicked. This indefinite wait ensures it works for videos of any length.
+
+5.  **Exit Gracefully**: Once a new video is detected, the script prints a success message with the new filename and closes the browser, completing the process.
+
+### Prerequisites
+
+- A running instance of the Gradio/Hunyuan video generation application at `http://localhost:7860`.
+- The `mutagen` Python library for reading audio metadata (`pip install mutagen`).
+- The necessary output directory structure must exist for the script to monitor (`C:\Users\tasos\Code\HunyuanVideo\Wan2GP\outputs`).
+
+### How to Run
+
+Ensure all prerequisite services are running and file paths at the top of the script are correct. Then, execute the script from the project root:
+
+```bash
+# Ensure your virtual environment is activated
+venv\Scripts\python.exe src/ugc/upload_to_wangp.py
+```
+
+The script will provide detailed print statements in the console for every step it takes, from file analysis to browser automation and final video detection.
