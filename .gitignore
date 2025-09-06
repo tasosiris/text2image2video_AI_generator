@@ -25,6 +25,8 @@ config/youtube_token.json
 
 # IDE
 .vscode/
+!.vscode/settings.json
+!.vscode/profile.ps1
 .idea/
 *.suo
 *.ntvs*

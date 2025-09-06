@@ -2,10 +2,11 @@ import os
 import json
 import sys
 import re
+import random
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 
 # Load environment variables from a .env file.
 # This allows you to store sensitive information like API keys securely.
@@ -153,13 +154,15 @@ def create_safe_name(name: str) -> str:
     safe_name = re.sub(r'[^\w\s-]', '', name)
     # Replaces one or more spaces or hyphens with a single underscore.
     safe_name = re.sub(r'[-\s]+', '_', safe_name)
+    # Truncate the name to a reasonable length to avoid filesystem errors
+    safe_name = safe_name[:75]
     # Removes any leading or trailing underscores that might have been created.
     return safe_name.strip('_')
 
-def save_script_to_json(creator_name: str, product_name: str, script_data: list[dict]) -> Optional[str]:
+def save_script_to_json(creator_name: str, product_name: str, product_id: str, script_data: list[dict]) -> Optional[str]:
     """
     Saves the structured script data to a JSON file.
-    The structure will be: outputs/ugc_scripts/CREATOR_NAME/YYYY-MM-DD_PRODUCT_NAME_script/PRODUCT_NAME_script.json
+    The structure will be: outputs/ugc_scripts/CREATOR_NAME/YYYY-MM-DD_PRODUCT_ID/PRODUCT_NAME_script.json
     Returns:
         The path to the saved JSON file, or None on failure.
     """
@@ -176,7 +179,7 @@ def save_script_to_json(creator_name: str, product_name: str, script_data: list[
         date_str = datetime.now().strftime('%Y-%m-%d')
         
         # Define the name for the new script-specific folder.
-        script_folder_name = f"{date_str}_{safe_product_name}_script"
+        script_folder_name = f"{date_str}_{product_id}"
         
         # Construct the full path for the new output directory.
         output_dir = os.path.join(project_root, 'outputs', 'ugc_scripts', safe_creator_name, script_folder_name)
@@ -199,46 +202,149 @@ def save_script_to_json(creator_name: str, product_name: str, script_data: list[
         return None
 
 
-def run_generate_ugc_script() -> Optional[str]:
+def select_product_and_creator() -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """
+    Selects a product with the minimum 'videos_generated' count and its matched creator.
+
+    Returns:
+        A tuple containing the selected product and creator profile, or (None, None) on failure.
+    """
+    try:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        matched_products_path = os.path.join(project_root, 'outputs', 'products', 'products_data.json')
+
+        with open(matched_products_path, 'r', encoding='utf-8') as f:
+            products = json.load(f)
+
+        # Filter for products with a matched profile and sort by videos_generated
+        eligible_products = [p for p in products if p.get('matched_profile')]
+        if not eligible_products:
+            print("No products with matched profiles found.", file=sys.stderr)
+            return None, None
+
+        sorted_products = sorted(eligible_products, key=lambda p: p.get('videos_generated', 0))
+        selected_product = sorted_products[0]
+
+        # Load creator profiles and find the matched one
+        profiles_path = os.path.join(script_dir, 'profiles.json')
+        with open(profiles_path, 'r', encoding='utf-8') as f:
+            profiles = json.load(f)
+
+        creator_name = selected_product['matched_profile']
+        creator_profile = next((p for p in profiles if p['name'] == creator_name), None)
+
+        if not creator_profile:
+            print(f"Creator profile for '{creator_name}' not found.", file=sys.stderr)
+            return selected_product, None
+
+        return selected_product, creator_profile
+
+    except FileNotFoundError as e:
+        print(f"Error: Required file not found. {e}", file=sys.stderr)
+        return None, None
+    except (json.JSONDecodeError, IndexError) as e:
+        print(f"Error reading or parsing JSON file: {e}", file=sys.stderr)
+        return None, None
+
+
+def format_product_for_prompt(product: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Formats the selected product data into the structure expected by the script generation prompt.
+    """
+    product_text = product.get("Products", "")
+    
+    # Extract a clean product name
+    if "Price:" in product_text:
+        product_name = product_text.split("Price:")[0].strip()
+    else:
+        product_name = product_text.split(',')[0].strip()
+    
+    product_name = re.sub(r'\[.*?\]', '', product_name).strip()
+
+    # Generic details based on category (can be expanded)
+    category = product.get("category", "General")
+    niche = f"E-commerce / {category}"
+    audience = "General audience on TikTok"
+    tone = "Authentic, engaging, and relatable"
+    problem = f"Finding a great product in the {category.lower()} space."
+    features = [f"High-quality {category.lower()} product", "Great value", "Popular online"]
+    cta = "Urge the user to buy the product from the TikTok Shop link."
+
+    return {
+        "name": product_name,
+        "niche": niche,
+        "audience": audience,
+        "tone": tone,
+        "problem": problem,
+        "features": features,
+        "cta": cta,
+        "product_id": product.get("product_id")
+    }
+
+
+def update_videos_generated_count(product_id: str):
+    """
+    Increments the 'videos_generated' count for the specified product.
+    """
+    try:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        matched_products_path = os.path.join(project_root, 'outputs', 'products', 'products_data.json')
+
+        with open(matched_products_path, 'r', encoding='utf-8') as f:
+            products = json.load(f)
+
+        product_found = False
+        for product in products:
+            if product.get('product_id') == product_id:
+                product['videos_generated'] = product.get('videos_generated', 0) + 1
+                product_found = True
+                break
+        
+        if product_found:
+            with open(matched_products_path, 'w', encoding='utf-8') as f:
+                json.dump(products, f, indent=4)
+            print(f"Incremented 'videos_generated' count for product_id: {product_id}")
+        else:
+            print(f"Warning: Product with id '{product_id}' not found for updating count.", file=sys.stderr)
+
+    except FileNotFoundError:
+        print(f"Error: '{matched_products_path}' not found.", file=sys.stderr)
+    except Exception as e:
+        print(f"An unexpected error occurred while updating video count: {e}", file=sys.stderr)
+
+
+def run_generate_ugc_script() -> Optional[tuple[str, str]]:
     """
     Runs the full UGC script generation process.
 
     Returns:
-        The path to the generated JSON file, or None on failure.
+        A tuple containing the path to the generated JSON file and the product image filename, or None on failure.
     """
-    # --- Test Data ---
-    # This dictionary holds all the information about the product for the test run.
-    test_product_details = {
-        "name": "Airtight Silicone Lid",
-        "niche": "Kitchen / Food Storage",
-        "audience": "College students & young adults",
-        "tone": "Fun, casual, relatable",
-        "problem": "Food going stale or spilling",
-        "features": ["One-click seal", "keeps food fresh three times longer", "dishwasher-safe"],
-        "cta": "Check the link below to get yours!"
-    }
+    print("--- Selecting Product and Creator for Script Generation ---")
+    selected_product, creator_profile_to_use = select_product_and_creator()
+
+    if not selected_product or not creator_profile_to_use:
+        print("Could not select a product or creator. Aborting script generation.", file=sys.stderr)
+        return None
+
+    product_details = format_product_for_prompt(selected_product)
+    product_id = product_details.get("product_id")
+    product_image_filename = selected_product.get("product_image_filename")
+
+    if not product_id or not product_image_filename:
+        print("Error: Selected product is missing 'product_id' or 'product_image_filename'. Aborting.", file=sys.stderr)
+        return None
 
     try:
-        # Construct a robust path to the profiles.json file.
-        # This makes sure the script can find the file regardless of where it's run from.
-        script_dir = os.path.dirname(os.path.realpath(__file__))
-        profiles_path = os.path.join(script_dir, 'profiles.json')
-
-        # Load the creator profiles from the JSON file.
-        with open(profiles_path, 'r', encoding='utf-8') as f:
-            profiles = json.load(f)
-        
-        # Select the first profile for this test run.
-        # This can be easily changed to select a different profile.
-        creator_profile_to_use = profiles[0]
-
         print("Generating UGC script with the following details:")
-        print(f"Product: {test_product_details['name']}")
+        print(f"Product: {product_details['name']}")
         print(f"Creator: {creator_profile_to_use['name']}")
         print("-" * 30)
 
-        # Call the generation function with the test data.
-        generated_script_text = generate_ugc_script(test_product_details, creator_profile_to_use)
+        # Call the generation function with the product data.
+        generated_script_text = generate_ugc_script(product_details, creator_profile_to_use)
 
         # Print the final raw script to the console for visibility.
         print("\n--- Generated UGC Script (Raw Text) ---")
@@ -253,10 +359,16 @@ def run_generate_ugc_script() -> Optional[str]:
             if structured_script_data:
                 json_path = save_script_to_json(
                     creator_name=creator_profile_to_use['name'],
-                    product_name=test_product_details['name'],
+                    product_name=product_details['name'],
+                    product_id=product_id,
                     script_data=structured_script_data
                 )
-                return json_path
+                
+                # Step 3: Increment the video count for the product
+                if json_path:
+                    update_videos_generated_count(product_id)
+                
+                return json_path, product_image_filename
             else:
                 # Add a check in case parsing fails to produce any data.
                 print("Error: Failed to parse the generated script text into a structured format.", file=sys.stderr)
@@ -264,12 +376,6 @@ def run_generate_ugc_script() -> Optional[str]:
         else:
             return None
 
-    except FileNotFoundError:
-        print(f"Error: 'profiles.json' not found at '{profiles_path}'. Make sure the file exists.", file=sys.stderr)
-        return None
-    except (json.JSONDecodeError, IndexError) as e:
-        print(f"Error reading or parsing 'profiles.json': {e}", file=sys.stderr)
-        return None
     except Exception as e:
         print(f"An unexpected error occurred in the main execution block: {e}", file=sys.stderr)
         return None

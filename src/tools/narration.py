@@ -30,7 +30,7 @@ from typing import Any, Iterable, List, Optional, Sequence
 
 import torch
 
-from tts_chatterbox import synthesize_with_chatterbox, save_mp3
+from src.tts_chatterbox import synthesize_with_chatterbox, save_mp3
 import re
 
 
@@ -175,6 +175,7 @@ def narrate_phrases(
     force_regeneration: bool = False,
     filename_prefix: str = "narration_",
     start_index: int = 1,
+    create_narration_subdir: bool = True,
     **settings_overrides: Any,
 ) -> List[Optional[str]]:
     """Synthesize many phrases concurrently and save as MP3 files.
@@ -183,8 +184,12 @@ def narrate_phrases(
     """
     final_settings = _with_overrides(settings, settings_overrides)
 
-    narration_output_dir = os.path.join(output_dir, "narration")
-    os.makedirs(narration_output_dir, exist_ok=True)
+    if create_narration_subdir:
+        narration_output_dir = os.path.join(output_dir, "narration")
+        os.makedirs(narration_output_dir, exist_ok=True)
+    else:
+        narration_output_dir = output_dir
+        os.makedirs(narration_output_dir, exist_ok=True)
 
     phrases_list = list(phrases)
     if not phrases_list:
